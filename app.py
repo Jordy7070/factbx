@@ -343,13 +343,17 @@ def display_analysis_tab(commandes_tarifées: pd.DataFrame):
     
     st.subheader("Détail des Marges")
     display_columns = [
-        "Nom du partenaire", "Service de transport",
-        "Pays destination", "Poids expédition",
-        "Tarif Total", "Prix d'Achat", "Marge"
+        "Nom du partenaire", 
+        "Service de transport",
+        "Pays destination", 
+        "Poids expédition",
+        "Tarif Total", 
+        "Prix d'Achat", 
+        "Marge"
     ]
+    
     if "Code Pays" in commandes_tarifées.columns:
-        display_columns.insert(3, "
-                               display_columns.insert(3, "Code Pays")
+        display_columns.insert(3, "Code Pays")
         
     st.dataframe(
         commandes_tarifées[display_columns],
@@ -359,20 +363,11 @@ def display_analysis_tab(commandes_tarifées: pd.DataFrame):
     
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric(
-            "Marge Totale",
-            f"{commandes_tarifées['Marge'].sum():.2f} €"
-        )
+        st.metric("Marge Totale", f"{commandes_tarifées['Marge'].sum():.2f} €")
     with col2:
-        st.metric(
-            "Marge Moyenne",
-            f"{commandes_tarifées['Marge'].mean():.2f} €"
-        )
+        st.metric("Marge Moyenne", f"{commandes_tarifées['Marge'].mean():.2f} €")
     with col3:
-        st.metric(
-            "Nombre de Commandes",
-            len(commandes_tarifées)
-        )
+        st.metric("Nombre de Commandes", len(commandes_tarifées))
 
 def display_weight_control_tab(compiled_file, facture_file):
     """Affiche l'analyse du contrôle de poids."""
