@@ -40,17 +40,12 @@ if 'data_cache' not in st.session_state:
         'calculation_done': False
     }
 
-# Fonction de standardisation des chaînes
-@st.cache_data
 def standardize_string(s: str) -> str:
-    """Standardise les chaînes de caractères pour la comparaison."""
     if pd.isna(s):
         return ''
     return str(s).strip().upper()
 
-@st.cache_data(ttl=3600)
-def load_data_optimized(file_uploader, dtype_config=None) -> pd.DataFrame:
-    """Charge et optimise les données depuis un fichier."""
+def load_data_optimized(file_uploader, dtype_config=None):
     try:
         df = pd.read_excel(
             file_uploader,
@@ -62,60 +57,40 @@ def load_data_optimized(file_uploader, dtype_config=None) -> pd.DataFrame:
         st.error(f"Erreur lors du chargement du fichier: {str(e)}")
         return pd.DataFrame()
 
-@st.cache_data
-def calculer_tarifs_vectorise(commandes: pd.DataFrame, tarifs: pd.DataFrame, taxe_par_transporteur: dict) -> pd.DataFrame:
-    """Calcule les tarifs avec une correspondance stricte des partenaires."""
-    # Copies de travail
+def calculer_tarifs_vectorise(commandes, tarifs, taxe_par_transporteur):
     commandes = commandes.copy()
     tarifs = tarifs.copy()
     
-    # Standardisation des colonnes pour la correspondance
-    commandes['Nom_partenaire_std'] = commandes['Nom du partenaire'].apply(standardize_string)
-    commandes['Service_std'] = commandes['Service de transport'].apply(standardize_string)
-    commandes['Pays_std'] = commandes['Pays destination'].apply(standardize_string)
+    # Standardisation
+    for col in ['Nom du partenaire', 'Service de transport', 'Pays destination']:
+        commandes[col] = commandes[col].apply(standardize_string)
+    for col in ['Partenaire', 'Service', 'Pays']:
+        tarifs[col] = tarifs[col].apply(standardize_string)
     
-    tarifs['Partenaire_std'] = tarifs['Partenaire'].apply(standardize_string)
-    tarifs['Service_std'] = tarifs['Service'].apply(standardize_string)
-    tarifs['Pays_std'] = tarifs['Pays'].apply(standardize_string)
-    
-    # Vérification des correspondances
-    with st.expander("Vérification des correspondances"):
-        st.write("Partenaires dans les commandes:", sorted(commandes['Nom_partenaire_std'].unique()))
-        st.write("Partenaires dans les tarifs:", sorted(tarifs['Partenaire_std'].unique()))
-    
-    # Fusion avec correspondance exacte
+    # Fusion
     merged = pd.merge(
         commandes,
         tarifs,
-        left_on=['Nom_partenaire_std', 'Service_std', 'Pays_std'],
-        right_on=['Partenaire_std', 'Service_std', 'Pays_std'],
+        left_on=['Nom du partenaire', 'Service de transport', 'Pays destination'],
+        right_on=['Partenaire', 'Service', 'Pays'],
         how='left',
         validate='many_to_one'
     )
     
-    # Vérification des conditions de poids
+    # Application des conditions de poids
     poids_condition = (
         (merged['Poids expédition'] >= merged['PoidsMin']) & 
         (merged['Poids expédition'] <= merged['PoidsMax'])
     )
-    
-    # Affichage des commandes sans correspondance
-    no_match = merged[merged['Prix'].isna()]
-    if not no_match.empty:
-        with st.expander("Commandes sans correspondance"):
-            st.dataframe(no_match[['Nom du partenaire', 'Service de transport', 
-                                 'Pays destination', 'Poids expédition']].head())
-    
-    # Application des conditions
     merged.loc[~poids_condition, 'Prix'] = np.nan
     
     # Calcul des taxes
     merged['Taxe'] = 0.0
     for transporteur, taux in taxe_par_transporteur.items():
-        mask = merged['Service_std'].str.contains(standardize_string(transporteur), regex=False)
+        mask = merged['Service de transport'].str.contains(standardize_string(transporteur))
         merged.loc[mask, 'Taxe'] = taux
     
-    # Création des résultats
+    # Résultats
     results = pd.DataFrame(index=commandes.index)
     results['Tarif de Base'] = merged['Prix']
     results['Taxe Gasoil'] = merged.apply(
@@ -126,19 +101,12 @@ def calculer_tarifs_vectorise(commandes: pd.DataFrame, tarifs: pd.DataFrame, tax
     
     return results
 
-@st.cache_data
-def application_calcul_tarif_optimise(
-    commandes: pd.DataFrame,
-    tarifs: pd.DataFrame,
-    taxe_par_transporteur: dict,
-    prix_achat_df: Optional[pd.DataFrame] = None
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Calcul optimisé des tarifs avec vérifications."""
+def application_calcul_tarif_optimise(commandes, tarifs, taxe_par_transporteur, prix_achat_df=None):
     try:
-        # Conversion des types numériques
         commandes = commandes.copy()
         tarifs = tarifs.copy()
         
+        # Conversion des colonnes numériques
         commandes['Poids expédition'] = pd.to_numeric(commandes['Poids expédition'], errors='coerce')
         tarifs['Prix'] = pd.to_numeric(tarifs['Prix'], errors='coerce')
         tarifs['PoidsMin'] = pd.to_numeric(tarifs['PoidsMin'], errors='coerce')
@@ -180,12 +148,9 @@ def application_calcul_tarif_optimise(
         
     except Exception as e:
         st.error(f"Erreur lors du calcul des tarifs : {str(e)}")
-        st.exception(e)
         raise e
 
-@st.cache_data
-def create_summary_metrics(commandes_tarifées: pd.DataFrame) -> Dict:
-    """Création des métriques résumées."""
+def create_summary_metrics(commandes_tarifées):
     metrics = {
         "total_commandes": len(commandes_tarifées),
         "ca_total": commandes_tarifées["Tarif Total"].sum(),
@@ -200,9 +165,7 @@ def create_summary_metrics(commandes_tarifées: pd.DataFrame) -> Dict:
     
     return metrics
 
-@st.cache_data
-def create_charts(commandes_tarifées: pd.DataFrame) -> Dict:
-    """Création des visualisations."""
+def create_charts(commandes_tarifées):
     charts = {}
     
     # Graphique des tarifs par partenaire
@@ -211,8 +174,7 @@ def create_charts(commandes_tarifées: pd.DataFrame) -> Dict:
         partenaire_data,
         x="Nom du partenaire",
         y="Tarif Total",
-        title="Tarif total par partenaire",
-        labels={"Tarif Total": "Montant (€)", "Nom du partenaire": "Partenaire"}
+        title="Tarif total par partenaire"
     )
     
     if "Marge" in commandes_tarifées.columns:
@@ -221,29 +183,25 @@ def create_charts(commandes_tarifées: pd.DataFrame) -> Dict:
             x="Tarif Total",
             y="Marge",
             color="Service de transport",
-            title="Marge vs Tarif",
-            labels={"Tarif Total": "Tarif (€)", "Marge": "Marge (€)"}
+            title="Marge vs Tarif"
         )
         
         charts["marges_service"] = px.box(
             commandes_tarifées,
             x="Service de transport",
             y="Marge %",
-            title="Distribution des marges par service",
-            labels={"Marge %": "Marge (%)", "Service de transport": "Service"}
+            title="Distribution des marges par service"
         )
     
     return charts
 
-@st.cache_data
-def convertir_df_en_excel(df: pd.DataFrame) -> bytes:
-    """Conversion d'un DataFrame en fichier Excel."""
+def convertir_df_en_excel(df):
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False)
     return output.getvalue()
- def create_analysis_tabs(commandes_tarifées, commandes_sans_tarif, metrics, charts):
-    """Création des onglets d'analyse."""
+
+def create_analysis_tabs(commandes_tarifées, commandes_sans_tarif, metrics, charts):
     tabs = st.tabs([
         "📊 Tableau de bord",
         "📈 Analyses détaillées",
@@ -311,8 +269,7 @@ def convertir_df_en_excel(df: pd.DataFrame) -> bytes:
                 analyse_df.reset_index(),
                 x=groupby_col,
                 y=new_cols[0],
-                title=f"Analyse {analyse_type}",
-                labels={new_cols[0]: "Montant (€)"}
+                title=f"Analyse {analyse_type}"
             )
             st.plotly_chart(fig, use_container_width=True)
             
