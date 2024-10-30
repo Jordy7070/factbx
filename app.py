@@ -7,7 +7,14 @@ from io import BytesIO
 from typing import Tuple, Dict, Optional, List
 import time
 
-# Configuration des types de données
+# Configuration de la page Streamlit
+st.set_page_config(
+    page_title="Calcul des Tarifs de Transport",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Configuration des types de données pour optimisation
 DTYPE_CONFIGS = {
     'commandes': {
         'Nom du partenaire': 'category',
@@ -22,13 +29,6 @@ DTYPE_CONFIGS = {
     }
 }
 
-# Configuration de la page
-st.set_page_config(
-    page_title="Calcul des Tarifs de Transport",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
 # Initialisation du state
 if 'data_cache' not in st.session_state:
     st.session_state.data_cache = {
@@ -40,10 +40,10 @@ if 'data_cache' not in st.session_state:
         'calculation_done': False
     }
 
-# Fonctions utilitaires optimisées
+# Fonctions utilitaires
 @st.cache_data(ttl=3600)
 def load_data_optimized(file_uploader, dtype_config=None) -> pd.DataFrame:
-    """Charge les données avec optimisation des types."""
+    """Charge et optimise les données depuis un fichier Excel."""
     if dtype_config is None:
         dtype_config = {}
     
@@ -74,7 +74,7 @@ def optimize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 def calculer_tarifs_vectorise(commandes: pd.DataFrame, 
                             tarifs: pd.DataFrame, 
                             taxe_par_transporteur: dict) -> pd.DataFrame:
-    """Calcule les tarifs de manière vectorisée."""
+    """Calcule les tarifs de manière vectorisée pour de meilleures performances."""
     # Préparation des données
     commandes = commandes.copy()
     tarifs = tarifs.copy()
@@ -97,18 +97,17 @@ def calculer_tarifs_vectorise(commandes: pd.DataFrame,
         how='left'
     )
     
-    # Application vectorisée des conditions
+    # Application des conditions
     mask_poids = (
         (merged['Poids expédition'] >= merged['PoidsMin']) & 
         (merged['Poids expédition'] <= merged['PoidsMax'])
     )
-    
     merged.loc[~mask_poids, 'Prix'] = np.nan
     
     # Gestion des doublons
     merged = merged.sort_values('Prix').groupby(merged.index).first()
     
-    # Calcul vectorisé de la taxe
+    # Calcul de la taxe
     merged['Taxe'] = 0
     for transporteur, taux in taxe_par_transporteur.items():
         mask_transporteur = merged['Service de transport'].str.lower().str.contains(
@@ -117,7 +116,7 @@ def calculer_tarifs_vectorise(commandes: pd.DataFrame,
         )
         merged.loc[mask_transporteur, 'Taxe'] = taux
     
-    # Calculs finaux vectorisés
+    # Calculs finaux
     result = pd.DataFrame({
         'Tarif de Base': merged['Prix'],
         'Taxe Gasoil': merged['Prix'] * (merged['Taxe'] / 100)
@@ -133,12 +132,12 @@ def application_calcul_tarif_optimise(
     taxe_par_transporteur: dict,
     prix_achat_df: Optional[pd.DataFrame] = None
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Calcule les tarifs avec optimisation."""
+    """Calcul optimisé des tarifs avec gestion des prix d'achat."""
     # Pré-traitement
     commandes = optimize_dataframe(commandes.copy())
     tarifs = optimize_dataframe(tarifs.copy())
     
-    # Conversion numérique
+    # Conversion des colonnes numériques
     commandes['Poids expédition'] = pd.to_numeric(commandes['Poids expédition'], errors='coerce')
     tarifs['Prix'] = pd.to_numeric(tarifs['Prix'], errors='coerce')
     
@@ -151,7 +150,7 @@ def application_calcul_tarif_optimise(
     commandes_tarifées = commandes[mask_tarif_trouve].copy()
     commandes_sans_tarif = commandes[~mask_tarif_trouve].copy()
     
-    # Calcul des marges
+    # Calcul des marges si prix d'achat disponible
     if prix_achat_df is not None:
         merge_cols = ["Service de transport"]
         if "Code Pays" in prix_achat_df.columns and "Code Pays" in commandes_tarifées.columns:
@@ -164,30 +163,36 @@ def application_calcul_tarif_optimise(
         ).rename(columns={"Prix Achat": "Prix d'Achat"})
         
         commandes_tarifées["Marge"] = commandes_tarifées["Tarif Total"] - commandes_tarifées["Prix d'Achat"]
-        
-        # Calcul des métriques supplémentaires
         commandes_tarifées["Marge %"] = (commandes_tarifées["Marge"] / commandes_tarifées["Tarif Total"] * 100).round(2)
     
     return commandes_tarifées, commandes_sans_tarif
 
 @st.cache_data
 def create_summary_metrics(commandes_tarifées: pd.DataFrame) -> Dict:
-    """Crée un résumé des métriques importantes."""
-    return {
+    """Création des métriques résumées."""
+    metrics = {
         "total_commandes": len(commandes_tarifées),
         "ca_total": commandes_tarifées["Tarif Total"].sum(),
-        "marge_totale": commandes_tarifées["Marge"].sum() if "Marge" in commandes_tarifées else 0,
-        "marge_moyenne": commandes_tarifées["Marge"].mean() if "Marge" in commandes_tarifées else 0,
-        "marge_pourcentage": (commandes_tarifées["Marge"].sum() / commandes_tarifées["Tarif Total"].sum() * 100) if "Marge" in commandes_tarifées else 0
     }
+    
+    if "Marge" in commandes_tarifées.columns:
+        metrics.update({
+            "marge_totale": commandes_tarifées["Marge"].sum(),
+            "marge_moyenne": commandes_tarifées["Marge"].mean(),
+            "marge_pourcentage": (commandes_tarifées["Marge"].sum() / commandes_tarifées["Tarif Total"].sum() * 100)
+        })
+    
+    return metrics
 
+@st.cache_data
 def create_charts(commandes_tarifées: pd.DataFrame) -> Dict:
-    """Crée les visualisations."""
+    """Création des visualisations."""
     charts = {}
     
     # Graphique des tarifs par partenaire
+    partenaire_data = commandes_tarifées.groupby("Nom du partenaire")["Tarif Total"].sum().reset_index()
     charts["tarifs_partenaire"] = px.bar(
-        commandes_tarifées.groupby("Nom du partenaire")["Tarif Total"].sum().reset_index(),
+        partenaire_data,
         x="Nom du partenaire",
         y="Tarif Total",
         title="Tarif total par partenaire",
@@ -205,7 +210,7 @@ def create_charts(commandes_tarifées: pd.DataFrame) -> Dict:
             labels={"Tarif Total": "Tarif (€)", "Marge": "Marge (€)"}
         )
         
-        # Graphique des marges par service
+        # Distribution des marges par service
         charts["marges_service"] = px.box(
             commandes_tarifées,
             x="Service de transport",
@@ -216,13 +221,21 @@ def create_charts(commandes_tarifées: pd.DataFrame) -> Dict:
     
     return charts
 
+@st.cache_data
+def convertir_df_en_excel(df: pd.DataFrame) -> bytes:
+    """Convertit un DataFrame en fichier Excel."""
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False)
+    return output.getvalue()
+
 def create_analysis_tabs(
     commandes_tarifées: pd.DataFrame,
     commandes_sans_tarif: pd.DataFrame,
     metrics: Dict,
     charts: Dict
 ):
-    """Crée les onglets d'analyse."""
+    """Création des onglets d'analyse."""
     tabs = st.tabs([
         "📊 Tableau de bord",
         "📈 Analyses détaillées",
@@ -235,13 +248,15 @@ def create_analysis_tabs(
     with tabs[0]:
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Total commandes", metrics["total_commandes"])
+            st.metric("Total commandes", f"{metrics['total_commandes']:,}")
             st.metric("CA Total", f"{metrics['ca_total']:,.2f} €")
         with col2:
-            st.metric("Marge totale", f"{metrics['marge_totale']:,.2f} €")
-            st.metric("Marge moyenne", f"{metrics['marge_moyenne']:,.2f} €")
+            if "marge_totale" in metrics:
+                st.metric("Marge totale", f"{metrics['marge_totale']:,.2f} €")
+                st.metric("Marge moyenne", f"{metrics['marge_moyenne']:,.2f} €")
         with col3:
-            st.metric("Marge globale", f"{metrics['marge_pourcentage']:.2f}%")
+            if "marge_pourcentage" in metrics:
+                st.metric("Marge globale", f"{metrics['marge_pourcentage']:.2f}%")
             st.metric("Commandes sans tarif", len(commandes_sans_tarif))
         
         st.plotly_chart(charts["tarifs_partenaire"], use_container_width=True)
@@ -253,35 +268,94 @@ def create_analysis_tabs(
         if "marges_service" in charts:
             st.plotly_chart(charts["marges_service"], use_container_width=True)
         
-        # Analyses supplémentaires par pays, service, etc.
         analyse_type = st.selectbox(
             "Type d'analyse",
             ["Par pays", "Par service", "Par partenaire"]
         )
         
-        if analyse_type == "Par pays":
-            groupby_col = "Pays destination"
-        elif analyse_type == "Par service":
-            groupby_col = "Service de transport"
-        else:
-            groupby_col = "Nom du partenaire"
+        # Configuration des agrégations
+        agg_cols = {
+            "Tarif Total": ["sum", "mean", "count"]
+        }
+        if "Marge" in commandes_tarifées.columns:
+            agg_cols["Marge"] = ["sum", "mean"]
         
-        analyse_df = commandes_tarifées.groupby(groupby_col).agg({
-            "Tarif Total": ["sum", "mean", "count"],
-            "Marge": ["sum", "mean"] if "Marge" in commandes_tarifées else None
-        }).round(2)
+        # Sélection de la colonne de groupement
+        group_cols = {
+            "Par pays": "Pays destination",
+            "Par service": "Service de transport",
+            "Par partenaire": "Nom du partenaire"
+        }
+        groupby_col = group_cols[analyse_type]
         
-        st.dataframe(analyse_df, use_container_width=True)
+        try:
+            # Agrégation des données
+            analyse_df = commandes_tarifées.groupby(groupby_col).agg(agg_cols)
+            
+            # Renommage des colonnes
+            new_cols = []
+            for col, aggs in agg_cols.items():
+                for agg in aggs:
+                    new_cols.append(f"{agg.capitalize()} {col}")
+            
+            analyse_df.columns = analyse_df.columns.droplevel()
+            analyse_df.columns = new_cols
+            analyse_df = analyse_df.round(2)
+            
+            # Affichage du tableau et du graphique
+            st.dataframe(analyse_df, use_container_width=True)
+            
+            fig = px.bar(
+                analyse_df.reset_index(),
+                x=groupby_col,
+                y=new_cols[0],
+                title=f"Analyse {analyse_type}",
+                labels={new_cols[0]: "Montant (€)"}
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+        except Exception as e:
+            st.error(f"Erreur lors de l'analyse: {str(e)}")
     
     # Données
     with tabs[2]:
-        st.dataframe(commandes_tarifées, use_container_width=True)
+        display_cols = [
+            "Nom du partenaire",
+            "Service de transport",
+            "Pays destination",
+            "Poids expédition",
+            "Tarif de Base",
+            "Taxe Gasoil",
+            "Tarif Total"
+        ]
+        
+        if "Code Pays" in commandes_tarifées.columns:
+            display_cols.insert(3, "Code Pays")
+        if "Marge" in commandes_tarifées.columns:
+            display_cols.extend(["Prix d'Achat", "Marge", "Marge %"])
+        
+        st.dataframe(
+            commandes_tarifées[display_cols],
+            use_container_width=True
+        )
     
     # Sans tarifs
     with tabs[3]:
         if not commandes_sans_tarif.empty:
             st.warning(f"{len(commandes_sans_tarif)} commandes sans tarif trouvé")
-            st.dataframe(commandes_sans_tarif, use_container_width=True)
+            display_cols_sans_tarif = [
+                "Nom du partenaire",
+                "Service de transport",
+                "Pays destination",
+                "Poids expédition"
+            ]
+            if "Code Pays" in commandes_sans_tarif.columns:
+                display_cols_sans_tarif.insert(3, "Code Pays")
+            
+            st.dataframe(
+                commandes_sans_tarif[display_cols_sans_tarif],
+                use_container_width=True
+            )
         else:
             st.success("Toutes les commandes ont un tarif calculé")
     
@@ -305,14 +379,6 @@ def create_analysis_tabs(
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
-@st.cache_data
-def convertir_df_en_excel(df: pd.DataFrame) -> bytes:
-    """Convertit un DataFrame en fichier Excel."""
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False)
-    return output.getvalue()
-
 def main():
     """Fonction principale de l'application."""
     st.title("Application de Calcul des Tarifs de Transport")
@@ -330,51 +396,87 @@ def main():
                 step=0.1,
                 key=f'taxe_{transporteur}'
             )
-    
+
     # Zone de téléchargement des fichiers
     with st.expander("📁 Fichiers", expanded=not st.session_state.data_cache['files_uploaded']):
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            commandes_file = st.file_uploader("Fichier des commandes", type=['xlsx'])
-        with col2:
-            tarifs_file = st.file_uploader("Fichier des tarifs", type=['xlsx'])
-        with col3:
-            prix_achat_file = st.file_uploader("Fichier des prix d'achat (optionnel)", type=['xlsx'])
+            commandes_file = st.file_uploader(
+                "Fichier des commandes",
+                type=['xlsx'],
+                help="Fichier Excel contenant les commandes à traiter"
+            )
         
+        with col2:
+            tarifs_file = st.file_uploader(
+                "Fichier des tarifs",
+                type=['xlsx'],
+                help="Fichier Excel contenant les grilles tarifaires"
+            )
+        
+        with col3:
+            prix_achat_file = st.file_uploader(
+                "Fichier des prix d'achat (optionnel)",
+                type=['xlsx'],
+                help="Fichier Excel contenant les prix d'achat pour le calcul des marges"
+            )
+
+        # Vérification et chargement des fichiers
         if commandes_file and tarifs_file:
             if not st.session_state.data_cache['files_uploaded']:
-                st.session_state.data_cache = {
-                    'commandes': load_data_optimized(commandes_file, DTYPE_CONFIGS['commandes']),
-                    'tarifs': load_data_optimized(tarifs_file, DTYPE_CONFIGS['tarifs']),
-                    'prix_achat': load_data_optimized(prix_achat_file) if prix_achat_file else None,
-                    'files_uploaded': True,
-                    'calculation_done': False,
-                    'results': None
-                }
-                st.success("✅ Fichiers chargés avec succès!")
+                with st.spinner("Chargement des fichiers..."):
+                    try:
+                        st.session_state.data_cache = {
+                            'commandes': load_data_optimized(commandes_file, DTYPE_CONFIGS['commandes']),
+                            'tarifs': load_data_optimized(tarifs_file, DTYPE_CONFIGS['tarifs']),
+                            'prix_achat': load_data_optimized(prix_achat_file) if prix_achat_file else None,
+                            'files_uploaded': True,
+                            'calculation_done': False,
+                            'results': None
+                        }
+                        st.success("✅ Fichiers chargés avec succès!")
+                    except Exception as e:
+                        st.error(f"Erreur lors du chargement des fichiers: {str(e)}")
+                        return
 
     # Bouton d'exécution des calculs
     if st.session_state.data_cache['files_uploaded'] and not st.session_state.data_cache['calculation_done']:
-        if st.button("🚀 Lancer le calcul des tarifs", type="primary"):
+        if st.button("🚀 Lancer le calcul des tarifs", type="primary", use_container_width=True):
             try:
                 with st.spinner("Calcul des tarifs en cours..."):
-                    # Mesure du temps d'exécution
                     start_time = time.time()
                     
-                    # Calcul des tarifs optimisé
+                    # Vérification des colonnes requises
+                    required_cols_commandes = ["Nom du partenaire", "Service de transport", "Pays destination", "Poids expédition"]
+                    required_cols_tarifs = ["Partenaire", "Service", "Pays", "PoidsMin", "PoidsMax", "Prix"]
+                    
+                    commandes = st.session_state.data_cache['commandes']
+                    tarifs = st.session_state.data_cache['tarifs']
+                    
+                    missing_cols_commandes = [col for col in required_cols_commandes if col not in commandes.columns]
+                    missing_cols_tarifs = [col for col in required_cols_tarifs if col not in tarifs.columns]
+                    
+                    if missing_cols_commandes or missing_cols_tarifs:
+                        if missing_cols_commandes:
+                            st.error(f"Colonnes manquantes dans le fichier commandes: {', '.join(missing_cols_commandes)}")
+                        if missing_cols_tarifs:
+                            st.error(f"Colonnes manquantes dans le fichier tarifs: {', '.join(missing_cols_tarifs)}")
+                        return
+                    
+                    # Calcul des tarifs
                     commandes_tarifées, commandes_sans_tarif = application_calcul_tarif_optimise(
-                        st.session_state.data_cache['commandes'],
-                        st.session_state.data_cache['tarifs'],
+                        commandes,
+                        tarifs,
                         taxe_par_transporteur,
                         st.session_state.data_cache['prix_achat']
                     )
                     
-                    # Calcul des métriques et graphiques
+                    # Création des métriques et graphiques
                     metrics = create_summary_metrics(commandes_tarifées)
                     charts = create_charts(commandes_tarifées)
                     
-                    # Stockage des résultats dans le cache
+                    # Stockage des résultats
                     st.session_state.data_cache['results'] = {
                         'commandes_tarifées': commandes_tarifées,
                         'commandes_sans_tarif': commandes_sans_tarif,
@@ -386,6 +488,7 @@ def main():
                     st.session_state.data_cache['calculation_done'] = True
                     
                     st.success(f"✨ Calculs terminés en {execution_time:.2f} secondes!")
+                    st.rerun()
                     
             except Exception as e:
                 st.error(f"❌ Erreur lors du calcul : {str(e)}")
@@ -395,7 +498,6 @@ def main():
     if st.session_state.data_cache['calculation_done']:
         results = st.session_state.data_cache['results']
         
-        # Création des onglets d'analyse
         create_analysis_tabs(
             results['commandes_tarifées'],
             results['commandes_sans_tarif'],
@@ -403,24 +505,26 @@ def main():
             results['charts']
         )
         
-        # Bouton pour réinitialiser les calculs
-        if st.button("🔄 Recalculer avec de nouveaux paramètres"):
-            st.session_state.data_cache['calculation_done'] = False
-            st.rerun()
+        # Boutons de réinitialisation
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔄 Recalculer avec les paramètres actuels", use_container_width=True):
+                st.session_state.data_cache['calculation_done'] = False
+                st.rerun()
         
-        # Bouton pour réinitialiser complètement
-        if st.button("🗑️ Réinitialiser et charger de nouveaux fichiers"):
-            st.session_state.data_cache = {
-                'commandes': None,
-                'tarifs': None,
-                'prix_achat': None,
-                'results': None,
-                'files_uploaded': False,
-                'calculation_done': False
-            }
-            st.rerun()
+        with col2:
+            if st.button("🗑️ Réinitialiser et charger de nouveaux fichiers", use_container_width=True):
+                st.session_state.data_cache = {
+                    'commandes': None,
+                    'tarifs': None,
+                    'prix_achat': None,
+                    'results': None,
+                    'files_uploaded': False,
+                    'calculation_done': False
+                }
+                st.rerun()
     
-    # Affichage des informations d'aide
+    # Aide et informations
     with st.expander("ℹ️ Aide et informations"):
         st.markdown("""
         ### Guide d'utilisation
@@ -431,14 +535,14 @@ def main():
         
         ### Format des fichiers requis
         
-        **Fichier des commandes** :
+        **Fichier des commandes**:
         - Nom du partenaire
         - Service de transport
         - Pays destination
         - Poids expédition
         - Code Pays (optionnel)
         
-        **Fichier des tarifs** :
+        **Fichier des tarifs**:
         - Partenaire
         - Service
         - Pays
@@ -446,7 +550,7 @@ def main():
         - PoidsMax
         - Prix
         
-        **Fichier des prix d'achat (optionnel)** :
+        **Fichier des prix d'achat (optionnel)**:
         - Service de transport
         - Prix Achat
         - Code Pays (optionnel)
