@@ -242,12 +242,7 @@ def convertir_df_en_excel(df: pd.DataFrame) -> bytes:
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False)
     return output.getvalue()
-    def create_analysis_tabs(
-    commandes_tarifées: pd.DataFrame,
-    commandes_sans_tarif: pd.DataFrame,
-    metrics: Dict,
-    charts: Dict
-):
+ def create_analysis_tabs(commandes_tarifées, commandes_sans_tarif, metrics, charts):
     """Création des onglets d'analyse."""
     tabs = st.tabs([
         "📊 Tableau de bord",
