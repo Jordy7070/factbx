@@ -7,25 +7,25 @@ from io import BytesIO
 from typing import Tuple, Dict, Optional, List
 import time
 
-# Configuration de la page Streamlit
+# Configuration de la page
 st.set_page_config(
     page_title="Calcul des Tarifs de Transport",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Configuration des types de données pour optimisation
+# Configuration des types de données
 DTYPE_CONFIGS = {
     'commandes': {
-        'Nom du partenaire': 'category',
-        'Service de transport': 'category',
-        'Pays destination': 'category',
-        'Code Pays': 'category'
+        'Nom du partenaire': 'string',
+        'Service de transport': 'string',
+        'Pays destination': 'string',
+        'Code Pays': 'string'
     },
     'tarifs': {
-        'Partenaire': 'category',
-        'Service': 'category',
-        'Pays': 'category'
+        'Partenaire': 'string',
+        'Service': 'string',
+        'Pays': 'string'
     }
 }
 
@@ -40,172 +40,148 @@ if 'data_cache' not in st.session_state:
         'calculation_done': False
     }
 
-# Fonctions utilitaires
+# Fonction de standardisation des chaînes
+@st.cache_data
+def standardize_string(s: str) -> str:
+    """Standardise les chaînes de caractères pour la comparaison."""
+    if pd.isna(s):
+        return ''
+    return str(s).strip().upper()
+
 @st.cache_data(ttl=3600)
 def load_data_optimized(file_uploader, dtype_config=None) -> pd.DataFrame:
-    """Charge et optimise les données depuis un fichier Excel."""
-    if dtype_config is None:
-        dtype_config = {}
-    
+    """Charge et optimise les données depuis un fichier."""
     try:
         df = pd.read_excel(
             file_uploader,
             dtype=dtype_config,
             engine='openpyxl'
         )
-        return optimize_dataframe(df)
+        return df
     except Exception as e:
         st.error(f"Erreur lors du chargement du fichier: {str(e)}")
         return pd.DataFrame()
 
-def optimize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Optimise la mémoire utilisée par le DataFrame."""
-    for col in df.columns:
-        if df[col].dtype == 'object':
-            if df[col].nunique() / len(df) < 0.5:
-                df[col] = df[col].astype('category')
-        elif df[col].dtype == 'float64':
-            df[col] = pd.to_numeric(df[col], downcast='float')
-        elif df[col].dtype == 'int64':
-            df[col] = pd.to_numeric(df[col], downcast='integer')
-    return df
-
-@st.cache_data
 @st.cache_data
 def calculer_tarifs_vectorise(commandes: pd.DataFrame, tarifs: pd.DataFrame, taxe_par_transporteur: dict) -> pd.DataFrame:
-    """Calcule les tarifs de manière vectorisée avec correspondance exacte des partenaires."""
-    # Préparation des données
+    """Calcule les tarifs avec une correspondance stricte des partenaires."""
+    # Copies de travail
     commandes = commandes.copy()
     tarifs = tarifs.copy()
     
-    # Assurons-nous que les noms de colonnes correspondent exactement
-    conditions = (
-        (tarifs['Partenaire'].values[:, None] == commandes['Nom du partenaire'].values) &
-        (tarifs['Service'].values[:, None] == commandes['Service de transport'].values) &
-        (tarifs['Pays'].values[:, None] == commandes['Pays destination'].values) &
-        (tarifs['PoidsMin'].values[:, None] <= commandes['Poids expédition'].values) &
-        (tarifs['PoidsMax'].values[:, None] >= commandes['Poids expédition'].values)
-    )
+    # Standardisation des colonnes pour la correspondance
+    commandes['Nom_partenaire_std'] = commandes['Nom du partenaire'].apply(standardize_string)
+    commandes['Service_std'] = commandes['Service de transport'].apply(standardize_string)
+    commandes['Pays_std'] = commandes['Pays destination'].apply(standardize_string)
     
-    # Création du masque pour trouver les correspondances
-    matches = conditions.any(axis=0)
+    tarifs['Partenaire_std'] = tarifs['Partenaire'].apply(standardize_string)
+    tarifs['Service_std'] = tarifs['Service'].apply(standardize_string)
+    tarifs['Pays_std'] = tarifs['Pays'].apply(standardize_string)
     
-    # Initialisation des résultats
-    resultats = pd.DataFrame(index=commandes.index)
-    resultats['Tarif de Base'] = np.nan
-    resultats['Taxe Gasoil'] = np.nan
-    resultats['Tarif Total'] = np.nan
+    # Vérification des correspondances
+    with st.expander("Vérification des correspondances"):
+        st.write("Partenaires dans les commandes:", sorted(commandes['Nom_partenaire_std'].unique()))
+        st.write("Partenaires dans les tarifs:", sorted(tarifs['Partenaire_std'].unique()))
     
-    # Pour chaque ligne qui a une correspondance
-    for idx in np.where(matches)[0]:
-        # Trouve la ligne correspondante dans tarifs
-        tarif_match = tarifs[conditions[:, idx]].iloc[0]
-        
-        # Calcul du tarif de base
-        resultats.loc[commandes.index[idx], 'Tarif de Base'] = tarif_match['Prix']
-        
-        # Calcul de la taxe gasoil
-        service = commandes.iloc[idx]['Service de transport']
-        for transporteur, taux in taxe_par_transporteur.items():
-            if transporteur.lower() in service.lower():
-                resultats.loc[commandes.index[idx], 'Taxe Gasoil'] = tarif_match['Prix'] * (taux / 100)
-                break
-    
-    # Calcul du tarif total
-    resultats['Tarif Total'] = resultats['Tarif de Base'] + resultats['Taxe Gasoil']
-    
-    return resultats
-
-@st.cache_data
-def calculer_tarifs_vectorise(commandes: pd.DataFrame, tarifs: pd.DataFrame, taxe_par_transporteur: dict) -> pd.DataFrame:
-    """Calcule les tarifs avec une approche vectorisée optimisée."""
-    # Préparation des données avec standardisation
-    commandes = commandes.copy()
-    tarifs = tarifs.copy()
-    
-    # Standardisation des colonnes de jointure
-    for col in ['Nom du partenaire', 'Service de transport', 'Pays destination']:
-        commandes[col] = commandes[col].str.strip().str.upper()
-    for col in ['Partenaire', 'Service', 'Pays']:
-        tarifs[col] = tarifs[col].str.strip().str.upper()
-    
-    # Fusion optimisée
+    # Fusion avec correspondance exacte
     merged = pd.merge(
         commandes,
         tarifs,
-        left_on=['Nom du partenaire', 'Service de transport', 'Pays destination'],
-        right_on=['Partenaire', 'Service', 'Pays'],
-        how='left'
+        left_on=['Nom_partenaire_std', 'Service_std', 'Pays_std'],
+        right_on=['Partenaire_std', 'Service_std', 'Pays_std'],
+        how='left',
+        validate='many_to_one'
     )
     
-    # Application des conditions de poids de manière vectorisée
+    # Vérification des conditions de poids
     poids_condition = (
         (merged['Poids expédition'] >= merged['PoidsMin']) & 
         (merged['Poids expédition'] <= merged['PoidsMax'])
     )
+    
+    # Affichage des commandes sans correspondance
+    no_match = merged[merged['Prix'].isna()]
+    if not no_match.empty:
+        with st.expander("Commandes sans correspondance"):
+            st.dataframe(no_match[['Nom du partenaire', 'Service de transport', 
+                                 'Pays destination', 'Poids expédition']].head())
+    
+    # Application des conditions
     merged.loc[~poids_condition, 'Prix'] = np.nan
     
-    # Calcul vectorisé de la taxe gasoil
+    # Calcul des taxes
     merged['Taxe'] = 0.0
     for transporteur, taux in taxe_par_transporteur.items():
-        mask = merged['Service de transport'].str.contains(transporteur.upper(), regex=False)
+        mask = merged['Service_std'].str.contains(standardize_string(transporteur), regex=False)
         merged.loc[mask, 'Taxe'] = taux
     
-    # Calcul final des tarifs
+    # Création des résultats
     results = pd.DataFrame(index=commandes.index)
-    results['Tarif de Base'] = merged.groupby(level=0)['Prix'].first()
-    results['Taxe Gasoil'] = merged.groupby(level=0).apply(
-        lambda x: x['Prix'].iloc[0] * x['Taxe'].iloc[0] / 100 if not x['Prix'].isna().all() else np.nan
+    results['Tarif de Base'] = merged['Prix']
+    results['Taxe Gasoil'] = merged.apply(
+        lambda row: row['Prix'] * row['Taxe'] / 100 if pd.notnull(row['Prix']) else np.nan,
+        axis=1
     )
     results['Tarif Total'] = results['Tarif de Base'] + results['Taxe Gasoil']
     
     return results
 
-@st.cache_data(ttl=3600)
+@st.cache_data
 def application_calcul_tarif_optimise(
     commandes: pd.DataFrame,
     tarifs: pd.DataFrame,
     taxe_par_transporteur: dict,
     prix_achat_df: Optional[pd.DataFrame] = None
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Traitement optimisé des calculs de tarifs."""
-    # Conversion des colonnes numériques une seule fois
-    commandes['Poids expédition'] = pd.to_numeric(commandes['Poids expédition'], errors='coerce')
-    tarifs['Prix'] = pd.to_numeric(tarifs['Prix'], errors='coerce')
-    tarifs['PoidsMin'] = pd.to_numeric(tarifs['PoidsMin'], errors='coerce')
-    tarifs['PoidsMax'] = pd.to_numeric(tarifs['PoidsMax'], errors='coerce')
-    
-    # Calcul des tarifs
-    resultats = calculer_tarifs_vectorise(commandes, tarifs, taxe_par_transporteur)
-    commandes = commandes.join(resultats)
-    
-    # Séparation optimisée des résultats
-    mask_tarif_trouve = commandes['Tarif de Base'].notna()
-    commandes_tarifées = commandes[mask_tarif_trouve]
-    commandes_sans_tarif = commandes[~mask_tarif_trouve]
-    
-    # Calcul des marges si prix d'achat disponible
-    if prix_achat_df is not None:
-        merge_cols = ['Service de transport']
-        if 'Code Pays' in prix_achat_df.columns and 'Code Pays' in commandes_tarifées.columns:
-            merge_cols.append('Code Pays')
+    """Calcul optimisé des tarifs avec vérifications."""
+    try:
+        # Conversion des types numériques
+        commandes = commandes.copy()
+        tarifs = tarifs.copy()
         
-        # Standardisation du service de transport pour la fusion
-        prix_achat_df['Service de transport'] = prix_achat_df['Service de transport'].str.strip().str.upper()
+        commandes['Poids expédition'] = pd.to_numeric(commandes['Poids expédition'], errors='coerce')
+        tarifs['Prix'] = pd.to_numeric(tarifs['Prix'], errors='coerce')
+        tarifs['PoidsMin'] = pd.to_numeric(tarifs['PoidsMin'], errors='coerce')
+        tarifs['PoidsMax'] = pd.to_numeric(tarifs['PoidsMax'], errors='coerce')
         
-        # Fusion optimisée pour les prix d'achat
-        commandes_tarifées = pd.merge(
-            commandes_tarifées,
-            prix_achat_df[merge_cols + ['Prix Achat']],
-            on=merge_cols,
-            how='left'
-        ).rename(columns={'Prix Achat': "Prix d'Achat"})
+        # Calcul des tarifs
+        resultats = calculer_tarifs_vectorise(commandes, tarifs, taxe_par_transporteur)
+        commandes[['Tarif de Base', 'Taxe Gasoil', 'Tarif Total']] = resultats
         
-        # Calcul vectorisé des marges
-        commandes_tarifées['Marge'] = commandes_tarifées['Tarif Total'] - commandes_tarifées["Prix d'Achat"]
-        commandes_tarifées['Marge %'] = (commandes_tarifées['Marge'] / commandes_tarifées['Tarif Total'] * 100).round(2)
-    
-    return commandes_tarifées, commandes_sans_tarif
+        # Séparation des résultats
+        mask_tarif_trouve = commandes['Tarif de Base'].notna()
+        commandes_tarifées = commandes[mask_tarif_trouve].copy()
+        commandes_sans_tarif = commandes[~mask_tarif_trouve].copy()
+        
+        # Calcul des marges
+        if prix_achat_df is not None and not prix_achat_df.empty:
+            prix_achat_df = prix_achat_df.copy()
+            merge_cols = ['Service de transport']
+            
+            if 'Code Pays' in prix_achat_df.columns and 'Code Pays' in commandes_tarifées.columns:
+                merge_cols.append('Code Pays')
+            
+            prix_achat_df['Service de transport'] = prix_achat_df['Service de transport'].apply(standardize_string)
+            commandes_tarifées['Service_std'] = commandes_tarifées['Service de transport'].apply(standardize_string)
+            
+            commandes_tarifées = pd.merge(
+                commandes_tarifées,
+                prix_achat_df,
+                left_on=['Service_std'] + (['Code Pays'] if 'Code Pays' in merge_cols else []),
+                right_on=['Service de transport'] + (['Code Pays'] if 'Code Pays' in merge_cols else []),
+                how='left'
+            )
+            
+            commandes_tarifées['Prix d\'Achat'] = commandes_tarifées['Prix Achat']
+            commandes_tarifées['Marge'] = commandes_tarifées['Tarif Total'] - commandes_tarifées['Prix d\'Achat']
+            commandes_tarifées['Marge %'] = (commandes_tarifées['Marge'] / commandes_tarifées['Tarif Total'] * 100).round(2)
+        
+        return commandes_tarifées, commandes_sans_tarif
+        
+    except Exception as e:
+        st.error(f"Erreur lors du calcul des tarifs : {str(e)}")
+        st.exception(e)
+        raise e
 
 @st.cache_data
 def create_summary_metrics(commandes_tarifées: pd.DataFrame) -> Dict:
@@ -240,7 +216,6 @@ def create_charts(commandes_tarifées: pd.DataFrame) -> Dict:
     )
     
     if "Marge" in commandes_tarifées.columns:
-        # Graphique des marges
         charts["marges"] = px.scatter(
             commandes_tarifées,
             x="Tarif Total",
@@ -250,7 +225,6 @@ def create_charts(commandes_tarifées: pd.DataFrame) -> Dict:
             labels={"Tarif Total": "Tarif (€)", "Marge": "Marge (€)"}
         )
         
-        # Distribution des marges par service
         charts["marges_service"] = px.box(
             commandes_tarifées,
             x="Service de transport",
@@ -263,13 +237,12 @@ def create_charts(commandes_tarifées: pd.DataFrame) -> Dict:
 
 @st.cache_data
 def convertir_df_en_excel(df: pd.DataFrame) -> bytes:
-    """Convertit un DataFrame en fichier Excel."""
+    """Conversion d'un DataFrame en fichier Excel."""
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False)
     return output.getvalue()
-
-def create_analysis_tabs(
+    def create_analysis_tabs(
     commandes_tarifées: pd.DataFrame,
     commandes_sans_tarif: pd.DataFrame,
     metrics: Dict,
@@ -313,14 +286,12 @@ def create_analysis_tabs(
             ["Par pays", "Par service", "Par partenaire"]
         )
         
-        # Configuration des agrégations
         agg_cols = {
             "Tarif Total": ["sum", "mean", "count"]
         }
         if "Marge" in commandes_tarifées.columns:
             agg_cols["Marge"] = ["sum", "mean"]
         
-        # Sélection de la colonne de groupement
         group_cols = {
             "Par pays": "Pays destination",
             "Par service": "Service de transport",
@@ -329,10 +300,7 @@ def create_analysis_tabs(
         groupby_col = group_cols[analyse_type]
         
         try:
-            # Agrégation des données
             analyse_df = commandes_tarifées.groupby(groupby_col).agg(agg_cols)
-            
-            # Renommage des colonnes
             new_cols = []
             for col, aggs in agg_cols.items():
                 for agg in aggs:
@@ -342,7 +310,6 @@ def create_analysis_tabs(
             analyse_df.columns = new_cols
             analyse_df = analyse_df.round(2)
             
-            # Affichage du tableau et du graphique
             st.dataframe(analyse_df, use_container_width=True)
             
             fig = px.bar(
@@ -374,10 +341,7 @@ def create_analysis_tabs(
         if "Marge" in commandes_tarifées.columns:
             display_cols.extend(["Prix d'Achat", "Marge", "Marge %"])
         
-        st.dataframe(
-            commandes_tarifées[display_cols],
-            use_container_width=True
-        )
+        st.dataframe(commandes_tarifées[display_cols], use_container_width=True)
     
     # Sans tarifs
     with tabs[3]:
@@ -392,10 +356,7 @@ def create_analysis_tabs(
             if "Code Pays" in commandes_sans_tarif.columns:
                 display_cols_sans_tarif.insert(3, "Code Pays")
             
-            st.dataframe(
-                commandes_sans_tarif[display_cols_sans_tarif],
-                use_container_width=True
-            )
+            st.dataframe(commandes_sans_tarif[display_cols_sans_tarif], use_container_width=True)
         else:
             st.success("Toutes les commandes ont un tarif calculé")
     
@@ -462,7 +423,6 @@ def main():
                 help="Fichier Excel contenant les prix d'achat pour le calcul des marges"
             )
 
-        # Vérification et chargement des fichiers
         if commandes_file and tarifs_file:
             if not st.session_state.data_cache['files_uploaded']:
                 with st.spinner("Chargement des fichiers..."):
@@ -533,7 +493,7 @@ def main():
             except Exception as e:
                 st.error(f"❌ Erreur lors du calcul : {str(e)}")
                 st.info("📝 Vérifiez le format des fichiers et réessayez.")
-    
+
     # Affichage des résultats
     if st.session_state.data_cache['calculation_done']:
         results = st.session_state.data_cache['results']
@@ -548,12 +508,12 @@ def main():
         # Boutons de réinitialisation
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("🔄 Recalculer avec les paramètres actuels", use_container_width=True):
+            if st.button("🔄 Recalculer", use_container_width=True):
                 st.session_state.data_cache['calculation_done'] = False
                 st.rerun()
         
         with col2:
-            if st.button("🗑️ Réinitialiser et charger de nouveaux fichiers", use_container_width=True):
+            if st.button("🗑️ Réinitialiser", use_container_width=True):
                 st.session_state.data_cache = {
                     'commandes': None,
                     'tarifs': None,
@@ -563,7 +523,7 @@ def main():
                     'calculation_done': False
                 }
                 st.rerun()
-    
+
     # Aide et informations
     with st.expander("ℹ️ Aide et informations"):
         st.markdown("""
