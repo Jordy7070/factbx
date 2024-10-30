@@ -248,7 +248,6 @@ def convertir_df_en_excel(df: pd.DataFrame) -> bytes:
     metrics: Dict,
     charts: Dict
 ):
-   
     """Création des onglets d'analyse."""
     tabs = st.tabs([
         "📊 Tableau de bord",
