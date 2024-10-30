@@ -3,12 +3,31 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 from io import BytesIO
+from typing import Tuple, Dict, Optional
 
-# Configuration de la page Streamlit
-st.set_page_config(page_title="Calcul des Tarifs de Transport", layout="wide")
+# Configuration de la page
+st.set_page_config(
+    page_title="Calcul des Tarifs de Transport",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-def calculer_tarif_avec_taxe(partenaire, service, pays, poids, tarifs, taxe_par_transporteur):
-    """Calculate base rate and fuel tax for a shipment."""
+# Fonctions utilitaires avec cache
+@st.cache_data
+def load_data(file_uploader) -> pd.DataFrame:
+    """Charge et met en cache les données depuis un fichier uploadé."""
+    return pd.read_excel(file_uploader)
+
+@st.cache_data
+def calculer_tarif_avec_taxe(
+    partenaire: str,
+    service: str, 
+    pays: str,
+    poids: float,
+    tarifs: pd.DataFrame,
+    taxe_par_transporteur: Dict[str, float]
+) -> Tuple[float, float, float]:
+    """Calcule le tarif avec taxe pour une expédition."""
     tarif_ligne = tarifs[
         (tarifs["Partenaire"] == partenaire) &
         (tarifs["Service"] == service) &
@@ -29,30 +48,54 @@ def calculer_tarif_avec_taxe(partenaire, service, pays, poids, tarifs, taxe_par_
     taxe_gasoil = tarif_base * (taxe / 100)
     return tarif_base, taxe_gasoil, tarif_base + taxe_gasoil
 
-def application_calcul_tarif(commandes, tarifs, taxe_par_transporteur, prix_achat_df=None):
-    """Process orders with pricing calculations."""
-    # Vérifier si le Code Pays existe dans les données
+@st.cache_data
+def application_calcul_tarif_batch(
+    commandes: pd.DataFrame,
+    tarifs: pd.DataFrame,
+    taxe_par_transporteur: Dict[str, float],
+    prix_achat_df: Optional[pd.DataFrame] = None,
+    batch_size: int = 1000
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Traite les commandes par lots pour de meilleures performances."""
     has_code_pays = "Code Pays" in commandes.columns
+    results = []
     
-    commandes[["Tarif de Base", "Taxe Gasoil", "Tarif Total"]] = commandes.apply(
-        lambda row: calculer_tarif_avec_taxe(
-            row["Nom du partenaire"],
-            row["Service de transport"],
-            row["Pays destination"],
-            row["Poids expédition"],
-            tarifs,
-            taxe_par_transporteur
-        ), axis=1, result_type="expand"
-    )
-
-    commandes_sans_tarif = commandes[commandes["Tarif de Base"] == "Tarif non trouvé"]
-    commandes_tarifées = commandes[commandes["Tarif de Base"] != "Tarif non trouvé"]
-
+    # Traitement par lots
+    for start_idx in range(0, len(commandes), batch_size):
+        batch = commandes.iloc[start_idx:start_idx + batch_size]
+        batch_results = []
+        
+        for _, row in batch.iterrows():
+            tarifs_batch = calculer_tarif_avec_taxe(
+                row["Nom du partenaire"],
+                row["Service de transport"],
+                row["Pays destination"],
+                row["Poids expédition"],
+                tarifs,
+                taxe_par_transporteur
+            )
+            batch_results.append(tarifs_batch)
+        
+        results.extend(batch_results)
+        
+        # Indication de progression
+        progress = min((start_idx + batch_size) / len(commandes), 1.0)
+        st.progress(progress)
+    
+    commandes_processed = commandes.copy()
+    commandes_processed[["Tarif de Base", "Taxe Gasoil", "Tarif Total"]] = pd.DataFrame(results)
+    
+    # Séparation et conversion
+    mask_tarif_trouve = commandes_processed["Tarif de Base"] != "Tarif non trouvé"
+    commandes_tarifées = commandes_processed[mask_tarif_trouve].copy()
+    commandes_sans_tarif = commandes_processed[~mask_tarif_trouve].copy()
+    
+    # Conversion numérique
     for col in ["Tarif de Base", "Taxe Gasoil", "Tarif Total"]:
         commandes_tarifées[col] = pd.to_numeric(commandes_tarifées[col], errors='coerce')
-
+    
+    # Calcul des marges
     if prix_achat_df is not None:
-        # Vérifier si le prix d'achat contient Code Pays
         merge_cols = ["Service de transport"]
         if has_code_pays and "Code Pays" in prix_achat_df.columns:
             merge_cols.append("Code Pays")
@@ -61,30 +104,25 @@ def application_calcul_tarif(commandes, tarifs, taxe_par_transporteur, prix_acha
             prix_achat_df,
             on=merge_cols,
             how="left"
-        )
+        ).rename(columns={"Prix Achat": "Prix d'Achat"})
         
-        commandes_tarifées.rename(columns={"Prix Achat": "Prix d'Achat"}, inplace=True)
         commandes_tarifées["Marge"] = commandes_tarifées["Tarif Total"] - commandes_tarifées["Prix d'Achat"]
     else:
         commandes_tarifées["Prix d'Achat"] = np.nan
         commandes_tarifées["Marge"] = np.nan
-
+    
     return commandes_tarifées, commandes_sans_tarif
 
-def convertir_df_en_excel(df, include_marge=False):
-    """Convert DataFrame to Excel file."""
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        if not include_marge:
-            df = df.drop(columns=["Prix d'Achat", "Marge"], errors="ignore")
-        df.to_excel(writer, index=False)
-    return output.getvalue()
-
-def process_weight_control(compiled_file, facture_file):
-    """Process weight control files and return enriched data."""
-    compiled_data = pd.read_excel(compiled_file)
-    facture_data = pd.read_excel(facture_file)
+@st.cache_data
+def process_weight_control(
+    compiled_file,
+    facture_file
+) -> pd.DataFrame:
+    """Traite et met en cache les données de contrôle de poids."""
+    compiled_data = load_data(compiled_file)
+    facture_data = load_data(facture_file)
     
+    # Renommage des colonnes
     compiled_data = compiled_data.rename(columns={
         "Numéro de commande partenaire": "Tracking",
         "Poids expédition": "Poids_expédition"
@@ -93,16 +131,32 @@ def process_weight_control(compiled_file, facture_file):
         "Poids constaté": "Poids_facture"
     })
     
+    # Conversion des types
     compiled_data["Tracking"] = compiled_data["Tracking"].astype(str)
     facture_data["Tracking"] = facture_data["Tracking"].astype(str)
     
+    # Fusion et calcul
     merged_data = pd.merge(facture_data, compiled_data, on="Tracking", how="left")
     merged_data["Ecart_Poids"] = merged_data["Poids_facture"] - merged_data["Poids_expédition"]
     
     return merged_data
 
-def display_results_tab(commandes_tarifées, commandes_sans_tarif):
-    """Display filtered results for both priced and unpriced orders."""
+@st.cache_data
+def convertir_df_en_excel(df: pd.DataFrame, include_marge: bool = False) -> bytes:
+    """Convertit un DataFrame en fichier Excel."""
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        if not include_marge:
+            df = df.drop(columns=["Prix d'Achat", "Marge"], errors="ignore")
+        df.to_excel(writer, index=False)
+    return output.getvalue()
+
+# Fonctions d'affichage
+def display_results_tab(
+    commandes_tarifées: pd.DataFrame,
+    commandes_sans_tarif: pd.DataFrame
+):
+    """Affiche l'onglet des résultats avec filtres."""
     col1, col2 = st.columns([2, 1])
     
     with col1:
@@ -127,9 +181,9 @@ def display_results_tab(commandes_tarifées, commandes_sans_tarif):
         st.metric("Total commandes", len(commandes_tarifées) + len(commandes_sans_tarif))
         st.metric("Commandes sans tarif", len(commandes_sans_tarif))
         if len(commandes_tarifées) > 0:
-            total = commandes_tarifées['Tarif Total'].sum()
-            st.metric("Montant total", f"{total:.2f} €")
+            st.metric("Montant total", f"{commandes_tarifées['Tarif Total'].sum():.2f} €")
     
+    # Application des filtres
     filtered_data = commandes_tarifées.copy()
     for col, selected in filters.items():
         if selected:
@@ -138,6 +192,7 @@ def display_results_tab(commandes_tarifées, commandes_sans_tarif):
                       "Pays destination"
             filtered_data = filtered_data[filtered_data[col_name].isin(selected)]
     
+    # Affichage des résultats
     st.subheader("Commandes avec Tarifs Calculés")
     display_columns = ["Nom du partenaire", "Service de transport", 
                       "Pays destination", "Poids expédition",
@@ -146,22 +201,30 @@ def display_results_tab(commandes_tarifées, commandes_sans_tarif):
     if "Code Pays" in filtered_data.columns:
         display_columns.insert(3, "Code Pays")
     
-    st.dataframe(filtered_data[display_columns])
+    st.dataframe(
+        filtered_data[display_columns],
+        height=400,
+        use_container_width=True
+    )
 
-    st.subheader("Commandes Sans Tarifs")
     if not commandes_sans_tarif.empty:
+        st.subheader("Commandes Sans Tarifs")
         display_columns_sans_tarif = ["Nom du partenaire", "Service de transport", 
                                     "Pays destination", "Poids expédition"]
         if "Code Pays" in commandes_sans_tarif.columns:
             display_columns_sans_tarif.insert(3, "Code Pays")
-            
-        st.dataframe(commandes_sans_tarif[display_columns_sans_tarif])
+        
+        st.dataframe(
+            commandes_sans_tarif[display_columns_sans_tarif],
+            height=200,
+            use_container_width=True
+        )
         st.warning(f"Nombre de commandes sans tarif trouvé : {len(commandes_sans_tarif)}")
     else:
         st.success("Toutes les commandes ont un tarif calculé")
 
-def display_graphics_tab(commandes_tarifées):
-    """Display interactive graphics."""
+def display_graphics_tab(commandes_tarifées: pd.DataFrame):
+    """Affiche les graphiques d'analyse."""
     st.subheader("Analyses Graphiques")
     
     chart_type = st.selectbox(
@@ -171,37 +234,66 @@ def display_graphics_tab(commandes_tarifées):
     
     if not commandes_tarifées.empty:
         if chart_type == "Coût par Partenaire":
-            data = commandes_tarifées.groupby("Nom du partenaire")["Tarif Total"].sum().reset_index()
+            data = commandes_tarifées.groupby("Nom du partenaire")["Tarif Total"].agg(
+                ['sum', 'mean', 'count']
+            ).reset_index()
             fig = px.bar(
                 data,
                 x="Nom du partenaire",
-                y="Tarif Total",
+                y="sum",
                 title="Coût total par Partenaire",
-                labels={"Tarif Total": "Coût total (€)", "Nom du partenaire": "Partenaire"}
+                labels={
+                    "sum": "Coût total (€)",
+                    "Nom du partenaire": "Partenaire"
+                }
             )
         elif chart_type == "Coût par Pays":
-            data = commandes_tarifées.groupby("Pays destination")["Tarif Total"].sum().reset_index()
+            data = commandes_tarifées.groupby("Pays destination")["Tarif Total"].agg(
+                ['sum', 'mean', 'count']
+            ).reset_index()
             fig = px.bar(
                 data,
                 x="Pays destination",
-                y="Tarif Total",
+                y="sum",
                 title="Coût total par Pays",
-                labels={"Tarif Total": "Coût total (€)", "Pays destination": "Pays"}
+                labels={
+                    "sum": "Coût total (€)",
+                    "Pays destination": "Pays"
+                }
             )
         else:
-            data = commandes_tarifées.groupby("Service de transport")["Tarif Total"].sum().reset_index()
+            data = commandes_tarifées.groupby("Service de transport")["Tarif Total"].agg(
+                ['sum', 'mean', 'count']
+            ).reset_index()
             fig = px.bar(
                 data,
                 x="Service de transport",
-                y="Tarif Total",
+                y="sum",
                 title="Coût total par Service",
-                labels={"Tarif Total": "Coût total (€)", "Service de transport": "Service"}
+                labels={
+                    "sum": "Coût total (€)",
+                    "Service de transport": "Service"
+                }
             )
         
-        st.plotly_chart(fig)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Affichage des statistiques détaillées
+        st.subheader("Statistiques détaillées")
+        st.dataframe(
+            data.rename(columns={
+                'sum': 'Total',
+                'mean': 'Moyenne',
+                'count': 'Nombre'
+            }).round(2),
+            use_container_width=True
+        )
 
-def display_download_tab(commandes_tarifées, commandes_sans_tarif):
-    """Display download buttons."""
+def display_download_tab(
+    commandes_tarifées: pd.DataFrame,
+    commandes_sans_tarif: pd.DataFrame
+):
+    """Affiche les options de téléchargement."""
     st.subheader("Téléchargement des Résultats")
     
     col1, col2 = st.columns(2)
@@ -222,8 +314,8 @@ def display_download_tab(commandes_tarifées, commandes_sans_tarif):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-def display_analysis_tab(commandes_tarifées):
-    """Display margin analysis."""
+def display_analysis_tab(commandes_tarifées: pd.DataFrame):
+    """Affiche l'analyse des marges."""
     st.subheader("Analyse de Marge")
     
     if "Code Pays" in commandes_tarifées.columns:
@@ -238,7 +330,7 @@ def display_analysis_tab(commandes_tarifées):
                             "CA Total", "Coût Total"]
         marge_pays = marge_pays.reset_index()
         
-        st.dataframe(marge_pays)
+        st.dataframe(marge_pays, use_container_width=True)
         
         fig = px.bar(
             marge_pays,
@@ -247,7 +339,7 @@ def display_analysis_tab(commandes_tarifées):
             title="Marge Totale par Pays",
             labels={"Marge Totale": "Marge (€)", "Code Pays": "Pays"}
         )
-        st.plotly_chart(fig)
+        st.plotly_chart(fig, use_container_width=True)
     
     st.subheader("Détail des Marges")
     display_columns = [
@@ -256,29 +348,63 @@ def display_analysis_tab(commandes_tarifées):
         "Tarif Total", "Prix d'Achat", "Marge"
     ]
     if "Code Pays" in commandes_tarifées.columns:
-        display_columns.insert(3, "Code Pays")
+        display_columns.insert(3, "
+                               display_columns.insert(3, "Code Pays")
         
-    st.dataframe(commandes_tarifées[display_columns])
+    st.dataframe(
+        commandes_tarifées[display_columns],
+        height=400,
+        use_container_width=True
+    )
     
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Marge Totale", f"{commandes_tarifées['Marge'].sum():.2f} €")
+        st.metric(
+            "Marge Totale",
+            f"{commandes_tarifées['Marge'].sum():.2f} €"
+        )
     with col2:
-        st.metric("Marge Moyenne", f"{commandes_tarifées['Marge'].mean():.2f} €")
+        st.metric(
+            "Marge Moyenne",
+            f"{commandes_tarifées['Marge'].mean():.2f} €"
+        )
     with col3:
-        st.metric("Nombre de Commandes", len(commandes_tarifées))
+        st.metric(
+            "Nombre de Commandes",
+            len(commandes_tarifées)
+        )
 
 def display_weight_control_tab(compiled_file, facture_file):
-    """Display weight control analysis."""
+    """Affiche l'analyse du contrôle de poids."""
     merged_data = process_weight_control(compiled_file, facture_file)
     
     st.subheader("Analyse des Écarts de Poids")
     
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Écart Moyen", f"{merged_data['Ecart_Poids'].mean():.2f} kg")
+        st.metric(
+            "Écart Moyen",
+            f"{merged_data['Ecart_Poids'].mean():.2f} kg"
+        )
     with col2:
-        st.metric("Écart Total", f"{merged_data['Ecart_Poids'].sum():.2f} kg")
+        st.metric(
+            "Écart Total",
+            f"{merged_data['Ecart_Poids'].sum():.2f} kg"
+        )
+    with col3:
+        st.metric(
+            "Nombre d'Écarts",
+            len(merged_data[merged_data['Ecart_Poids'] != 0])
+        )
+    
+    # Graphique des écarts
+    fig = px.histogram(
+        merged_data,
+        x="Ecart_Poids",
+        title="Distribution des Écarts de Poids",
+        labels={"Ecart_Poids": "Écart de Poids (kg)"}
+    )
+    st.plotly_chart(fig, use_container_width=True)
     
     st.download_button(
         "📥 Télécharger rapport de contrôle",
@@ -288,9 +414,10 @@ def display_weight_control_tab(compiled_file, facture_file):
     )
     
     st.subheader("Détail des Écarts")
-    st.dataframe(merged_data)
+    st.dataframe(merged_data, height=400, use_container_width=True)
 
 def main():
+    """Fonction principale de l'application."""
     st.title("Application de Calcul des Tarifs de Transport")
     
     # Sidebar configuration
@@ -302,86 +429,116 @@ def main():
             min_value=0.0,
             max_value=100.0,
             value=0.0,
-            step=0.1
+            step=0.1,
+            key=f"taxe_{transporteur}"
         )
         for transporteur in mots_cles_transporteurs
     }
     
-    # File uploaders
-    st.subheader("Téléchargement des Fichiers")
-    files = {
-        "commandes": st.file_uploader("Fichier de commandes", type=["xlsx"]),
-        "tarifs": st.file_uploader("Fichier de tarifs", type=["xlsx"]),
-        "prix_achat": st.file_uploader("Fichier prix d'achat (optionnel)", type=["xlsx"]),
-        "compiled": st.file_uploader("Fichier compilé", type=["xlsx"]),
-        "facture": st.file_uploader("Fichier de facturation", type=["xlsx"])
-    }
+    # État de session pour le cache des fichiers
+    if 'files' not in st.session_state:
+        st.session_state.files = {
+            'commandes': None,
+            'tarifs': None,
+            'prix_achat': None,
+            'compiled': None,
+            'facture': None
+        }
     
-    if files["commandes"] and files["tarifs"]:
+    # File uploaders avec mise en cache
+    with st.expander("📁 Téléchargement des Fichiers", expanded=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            files = {
+                'commandes': st.file_uploader("Fichier de commandes", type=["xlsx"]),
+                'tarifs': st.file_uploader("Fichier de tarifs", type=["xlsx"]),
+                'prix_achat': st.file_uploader("Fichier prix d'achat (optionnel)", type=["xlsx"])
+            }
+        with col2:
+            files.update({
+                'compiled': st.file_uploader("Fichier compilé", type=["xlsx"]),
+                'facture': st.file_uploader("Fichier de facturation", type=["xlsx"])
+            })
+    
+    # Mise à jour du cache des fichiers
+    for key, file in files.items():
+        if file is not None:
+            st.session_state.files[key] = file
+    
+    if st.session_state.files['commandes'] and st.session_state.files['tarifs']:
         try:
-            # Load and process main data
-            commandes = pd.read_excel(files["commandes"])
-            tarifs = pd.read_excel(files["tarifs"])
-            prix_achat_df = None
+            # Chargement et traitement des données avec barre de progression
+            with st.spinner("Chargement des données..."):
+                commandes = load_data(st.session_state.files['commandes'])
+                tarifs = load_data(st.session_state.files['tarifs'])
+                prix_achat_df = None
+                
+                if st.session_state.files['prix_achat']:
+                    prix_achat_df = load_data(st.session_state.files['prix_achat'])
             
-            # Vérification des colonnes requises dans le fichier de commandes
-            required_columns_commandes = ["Nom du partenaire", "Service de transport", 
-                                       "Pays destination", "Poids expédition"]
-            if not all(col in commandes.columns for col in required_columns_commandes):
-                missing_cols = [col for col in required_columns_commandes if col not in commandes.columns]
-                st.error(f"Colonnes manquantes dans le fichier de commandes: {', '.join(missing_cols)}")
+            # Vérification des colonnes requises
+            required_columns_commandes = [
+                "Nom du partenaire", "Service de transport",
+                "Pays destination", "Poids expédition"
+            ]
+            required_columns_tarifs = [
+                "Partenaire", "Service", "Pays",
+                "PoidsMin", "PoidsMax", "Prix"
+            ]
+            
+            missing_cols_commandes = [
+                col for col in required_columns_commandes 
+                if col not in commandes.columns
+            ]
+            missing_cols_tarifs = [
+                col for col in required_columns_tarifs 
+                if col not in tarifs.columns
+            ]
+            
+            if missing_cols_commandes or missing_cols_tarifs:
+                if missing_cols_commandes:
+                    st.error(f"Colonnes manquantes dans le fichier de commandes: {', '.join(missing_cols_commandes)}")
+                if missing_cols_tarifs:
+                    st.error(f"Colonnes manquantes dans le fichier de tarifs: {', '.join(missing_cols_tarifs)}")
                 return
-
-            # Vérification des colonnes requises dans le fichier de tarifs
-            required_columns_tarifs = ["Partenaire", "Service", "Pays", "PoidsMin", "PoidsMax", "Prix"]
-            if not all(col in tarifs.columns for col in required_columns_tarifs):
-                missing_cols = [col for col in required_columns_tarifs if col not in tarifs.columns]
-                st.error(f"Colonnes manquantes dans le fichier de tarifs: {', '.join(missing_cols)}")
-                return
             
-            if files["prix_achat"]:
-                try:
-                    prix_achat_df = pd.read_excel(files["prix_achat"])
-                    required_columns = ["Service de transport", "Prix Achat"]
-                    if not all(col in prix_achat_df.columns for col in required_columns):
-                        st.error("Le fichier de prix d'achat doit contenir les colonnes 'Service de transport' et 'Prix Achat'")
-                        prix_achat_df = None
-                except Exception as e:
-                    st.error(f"Erreur lors de la lecture du fichier de prix d'achat: {str(e)}")
-                    prix_achat_df = None
+            # Calcul des tarifs avec barre de progression
+            with st.spinner("Calcul des tarifs en cours..."):
+                commandes_tarifées, commandes_sans_tarif = application_calcul_tarif_batch(
+                    commandes, tarifs, taxe_par_transporteur, prix_achat_df
+                )
             
-            # Calculate prices and margins
-            commandes_tarifées, commandes_sans_tarif = application_calcul_tarif(
-                commandes, tarifs, taxe_par_transporteur, prix_achat_df
-            )
-            
-            # Create tabs for different views
+            # Création des onglets
             tabs = st.tabs([
-                "📊 Résultats", 
-                "📈 Graphiques", 
-                "💾 Téléchargement", 
-                "💰 Analyse", 
+                "📊 Résultats",
+                "📈 Graphiques",
+                "💾 Téléchargement",
+                "💰 Analyse",
                 "⚖️ Contrôle"
             ])
             
+            # Affichage des différents onglets
             with tabs[0]:
                 display_results_tab(commandes_tarifées, commandes_sans_tarif)
-                
+            
             with tabs[1]:
                 display_graphics_tab(commandes_tarifées)
-                
+            
             with tabs[2]:
                 display_download_tab(commandes_tarifées, commandes_sans_tarif)
-                
+            
             with tabs[3]:
                 if prix_achat_df is not None:
                     display_analysis_tab(commandes_tarifées)
                 else:
                     st.info("Veuillez télécharger le fichier de prix d'achat pour voir l'analyse des marges.")
-                
+            
             with tabs[4]:
-                if files["compiled"] and files["facture"]:
-                    display_weight_control_tab(files["compiled"], files["facture"])
+                if st.session_state.files['compiled'] and st.session_state.files['facture']:
+                    display_weight_control_tab(
+                        st.session_state.files['compiled'],
+                        st.session_state.files['facture']
+                    )
                 else:
                     st.info("Veuillez télécharger les fichiers compilé et de facturation pour le contrôle de poids.")
                     
