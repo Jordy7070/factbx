@@ -91,6 +91,38 @@ class DataLoader:
             return pd.DataFrame()
 
 class TariffCalculator:
+    """Calcul des tarifs et analyses"""
+    @staticmethod
+    @st.cache_data
+    def calculate_tariff(
+        partenaire: str,
+        service: str, 
+        pays: str,
+        poids: float,
+        tarifs: pd.DataFrame,
+        taxe_par_transporteur: Dict[str, float]
+    ) -> Tuple[float, float, float]:
+        try:
+            tarif_ligne = tarifs[
+                (tarifs["Partenaire"] == partenaire) & 
+                (tarifs["Service"] == service) & 
+                (tarifs["Pays"] == pays) & 
+                (tarifs["PoidsMin"] <= poids) & 
+                (tarifs["PoidsMax"] >= poids)
+            ]
+            
+            if tarif_ligne.empty:
+                return "Tarif non trouvé", "Tarif non trouvé", "Tarif non trouvé"
+                
+            tarif_base = tarif_ligne.iloc[0]["Prix"]
+            taxe = taxe_par_transporteur.get(service.lower(), 0)
+            taxe_gasoil = tarif_base * (taxe / 100)
+            
+            return tarif_base, taxe_gasoil, tarif_base + taxe_gasoil
+        except Exception as e:
+            st.error(f"Erreur de calcul : {str(e)}")
+            return "Erreur", "Erreur", "Erreur"
+
     @staticmethod
     @st.cache_data
     def process_orders_batch(
@@ -102,11 +134,6 @@ class TariffCalculator:
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Afficher les informations de debug
-        st.write("Nombre total de commandes avant traitement:", len(commandes))
-        st.write("Colonnes des commandes:", commandes.columns.tolist())
-        st.write("Colonnes des tarifs:", tarifs.columns.tolist())
-
         results = []
         total_batches = len(commandes) // BATCH_SIZE + 1
         
@@ -114,104 +141,25 @@ class TariffCalculator:
             status_text.text(f"Traitement du lot {batch_num + 1}/{total_batches}...")
             batch = commandes.iloc[start_idx:start_idx + BATCH_SIZE]
             
-            # Traiter chaque commande du lot
-            for _, row in batch.iterrows():
-                try:
-                    # Recherche plus flexible des tarifs
-                    tarif_ligne = tarifs[
-                        (tarifs["Partenaire"].str.lower() == row["Nom du partenaire"].str.lower()) &
-                        (tarifs["Service"].str.lower() == row["Service de transport"].str.lower()) &
-                        (tarifs["Pays"].str.lower() == row["Pays destination"].str.lower()) &
-                        (tarifs["PoidsMin"] <= row["Poids expédition"]) &
-                        (tarifs["PoidsMax"] >= row["Poids expédition"])
-                    ]
-                    
-                    if tarif_ligne.empty:
-                        # Si pas de correspondance exacte, chercher avec des critères plus souples
-                        tarif_ligne = tarifs[
-                            (tarifs["Service"].str.contains(row["Service de transport"], case=False, na=False)) &
-                            (tarifs["Pays"].str.lower() == row["Pays destination"].str.lower()) &
-                            (tarifs["PoidsMin"] <= row["Poids expédition"]) &
-                            (tarifs["PoidsMax"] >= row["Poids expédition"])
-                        ]
-                    
-                    if not tarif_ligne.empty:
-                        tarif_base = tarif_ligne.iloc[0]["Prix"]
-                        service = row["Service de transport"].lower()
-                        taxe = taxe_par_transporteur.get(service, 0)
-                        taxe_gasoil = tarif_base * (taxe / 100)
-                        results.append((tarif_base, taxe_gasoil, tarif_base + taxe_gasoil))
-                    else:
-                        results.append(("Tarif non trouvé", "Tarif non trouvé", "Tarif non trouvé"))
-                except Exception as e:
-                    st.warning(f"Erreur lors du traitement de la commande {row['Nom du partenaire']} - {row['Service de transport']}: {str(e)}")
-                    results.append(("Erreur", "Erreur", "Erreur"))
+            batch_results = [
+                TariffCalculator.calculate_tariff(
+                    row["Nom du partenaire"],
+                    row["Service de transport"],
+                    row["Pays destination"],
+                    row["Poids expédition"],
+                    tarifs,
+                    taxe_par_transporteur
+                )
+                for _, row in batch.iterrows()
+            ]
             
+            results.extend(batch_results)
             progress_bar.progress(min((batch_num + 1) / total_batches, 1.0))
 
         progress_bar.empty()
         status_text.empty()
 
-        # Création du DataFrame avec les résultats
-        commandes_processed = commandes.copy()
-        commandes_processed[["Tarif de Base", "Taxe Gasoil", "Tarif Total"]] = pd.DataFrame(results)
-        
-        # Séparation des commandes avec et sans tarif
-        mask_tarif_trouve = (commandes_processed["Tarif de Base"] != "Tarif non trouvé") & \
-                           (commandes_processed["Tarif de Base"] != "Erreur")
-                           
-        commandes_tarifées = commandes_processed[mask_tarif_trouve].copy()
-        commandes_sans_tarif = commandes_processed[~mask_tarif_trouve].copy()
-
-        # Conversion des colonnes numériques
-        if not commandes_tarifées.empty:
-            numeric_cols = ["Tarif de Base", "Taxe Gasoil", "Tarif Total"]
-            commandes_tarifées[numeric_cols] = commandes_tarifées[numeric_cols].apply(pd.to_numeric, errors='coerce')
-
-        # Calcul des marges si les prix d'achat sont disponibles
-        if prix_achat_df is not None:
-            commandes_tarifées = TariffCalculator._add_margin_calculation(commandes_tarifées, prix_achat_df)
-        else:
-            commandes_tarifées["Prix d'Achat"] = np.nan
-            commandes_tarifées["Marge"] = np.nan
-
-        # Afficher les statistiques de traitement
-        st.write("Statistiques de traitement:")
-        st.write(f"Commandes traitées avec succès: {len(commandes_tarifées)}")
-        st.write(f"Commandes sans tarif: {len(commandes_sans_tarif)}")
-
-        # Afficher les premières lignes sans correspondance pour le debug
-        if not commandes_sans_tarif.empty:
-            st.write("Exemples de commandes sans tarif trouvé:")
-            st.dataframe(commandes_sans_tarif.head())
-
-        return commandes_tarifées, commandes_sans_tarif
-
-    @staticmethod
-    def _add_margin_calculation(
-        commandes_tarifées: pd.DataFrame,
-        prix_achat_df: pd.DataFrame
-    ) -> pd.DataFrame:
-        try:
-            merged_df = commandes_tarifées.merge(
-                prix_achat_df,
-                left_on=["Service de transport", "Pays destination"],
-                right_on=["Service", "Pays"],
-                how="left"
-            )
-            
-            valid_weights = (
-                (merged_df["Poids expédition"] >= merged_df["PoidsMin"]) &
-                (merged_df["Poids expédition"] <= merged_df["PoidsMax"])
-            )
-            
-            result_df = merged_df[valid_weights].copy()
-            result_df["Marge"] = result_df["Tarif Total"] - result_df["Prix d'Achat"]
-            
-            return result_df
-        except Exception as e:
-            st.error(f"Erreur lors du calcul des marges: {str(e)}")
-            return commandes_tarifées
+        return TariffCalculator._process_results(commandes, results, prix_achat_df)
 
     @staticmethod
     def _process_results(
@@ -425,120 +373,115 @@ class UIManager:
         )
 
     @staticmethod
-    def display_analysis_tab(commandes_tarifées: pd.DataFrame):
-        """Affiche l'analyse détaillée des marges et des performances financières."""
-        st.subheader("💰 Analyse des Marges et Performances")
-
-        # Calcul des métriques clés
-        total_ca = commandes_tarifées["Tarif Total"].sum()
-        total_marge = commandes_tarifées["Marge"].sum() if "Marge" in commandes_tarifées.columns else 0
-        nombre_commandes = len(commandes_tarifées)
-        marge_moyenne = total_marge / nombre_commandes if nombre_commandes > 0 else 0
-        taux_marge = (total_marge / total_ca * 100) if total_ca > 0 else 0
-
-        # Affichage des métriques principales
-        col1, col2, col3, col4 = st.columns(4)
+    def display_graphics_tab(commandes_tarifées: pd.DataFrame):
+        st.subheader("📈 Analyses Graphiques")
+        
+        # Configuration des analyses
+        col1, col2 = st.columns([2, 1])
         with col1:
-            st.metric(
-                "Chiffre d'Affaires Total",
-                f"{total_ca:,.2f} €"
+            chart_type = st.selectbox(
+                "Type d'analyse",
+                ["Coût par Partenaire", "Coût par Pays", "Coût par Service", "Évolution des Marges"]
             )
         with col2:
-            st.metric(
-                "Marge Totale",
-                f"{total_marge:,.2f} €",
-                f"{taux_marge:.1f}%"
-            )
-        with col3:
-            st.metric(
-                "Marge Moyenne/Commande",
-                f"{marge_moyenne:.2f} €"
-            )
-        with col4:
-            st.metric(
-                "Nombre de Commandes",
-                f"{nombre_commandes:,}"
+            display_mode = st.radio(
+                "Mode d'affichage",
+                ["Barres", "Ligne"],
+                horizontal=True
             )
 
-        # Analyse détaillée par segment
-        st.subheader("Analyse par Segment")
-        analyse_type = st.selectbox(
-            "Sélectionner le type d'analyse",
-            ["Par Service", "Par Pays", "Par Partenaire"]
-        )
+        # Préparation des données selon le type d'analyse
+        if chart_type == "Coût par Partenaire":
+            data = commandes_tarifées.groupby("Nom du partenaire").agg({
+                "Tarif Total": "sum",
+                "Marge": "sum"
+            }).reset_index()
+            fig1 = UIManager.create_plotly_figure(
+                data,
+                "Nom du partenaire",
+                "Tarif Total",
+                "Coût total par Partenaire",
+                display_mode.lower()
+            )
+            fig2 = UIManager.create_plotly_figure(
+                data,
+                "Nom du partenaire",
+                "Marge",
+                "Marge par Partenaire",
+                display_mode.lower()
+            )
+        elif chart_type == "Coût par Pays":
+            data = commandes_tarifées.groupby("Pays destination").agg({
+                "Tarif Total": "sum",
+                "Marge": "sum"
+            }).reset_index()
+            fig1 = UIManager.create_plotly_figure(
+                data,
+                "Pays destination",
+                "Tarif Total",
+                "Coût total par Pays",
+                display_mode.lower()
+            )
+            fig2 = UIManager.create_plotly_figure(
+                data,
+                "Pays destination",
+                "Marge",
+                "Marge par Pays",
+                display_mode.lower()
+            )
+        elif chart_type == "Coût par Service":
+            data = commandes_tarifées.groupby("Service de transport").agg({
+                "Tarif Total": "sum",
+                "Marge": "sum"
+            }).reset_index()
+            fig1 = UIManager.create_plotly_figure(
+                data,
+                "Service de transport",
+                "Tarif Total",
+                "Coût total par Service",
+                display_mode.lower()
+            )
+            fig2 = UIManager.create_plotly_figure(
+                data,
+                "Service de transport",
+                "Marge",
+                "Marge par Service",
+                display_mode.lower()
+            )
+        else:  # Évolution des Marges
+            commandes_tarifées['Date'] = pd.to_datetime('today')  # À remplacer par la vraie colonne de date
+            data = commandes_tarifées.groupby('Date').agg({
+                "Tarif Total": "sum",
+                "Marge": "sum"
+            }).reset_index()
+            fig1 = UIManager.create_plotly_figure(
+                data,
+                "Date",
+                "Tarif Total",
+                "Évolution des coûts",
+                "ligne"
+            )
+            fig2 = UIManager.create_plotly_figure(
+                data,
+                "Date",
+                "Marge",
+                "Évolution des marges",
+                "ligne"
+            )
 
-        if analyse_type == "Par Service":
-            groupby_col = "Service de transport"
-        elif analyse_type == "Par Pays":
-            groupby_col = "Pays destination"
-        else:
-            groupby_col = "Nom du partenaire"
-
-        # Calcul des statistiques par segment
-        analyses = commandes_tarifées.groupby(groupby_col).agg({
-            "Tarif Total": ["sum", "mean", "count"],
-            "Marge": ["sum", "mean"]
-        }).round(2)
-        
-        analyses.columns = ["CA Total", "CA Moyen", "Nb Commandes", "Marge Totale", "Marge Moyenne"]
-        analyses = analyses.reset_index()
-        analyses["Taux de Marge"] = (analyses["Marge Totale"] / analyses["CA Total"] * 100).round(2)
-
-        # Affichage du tableau d'analyse
-        st.dataframe(
-            analyses,
-            use_container_width=True,
-            height=400,
-            column_config={
-                "CA Total": st.column_config.NumberColumn(
-                    "CA Total",
-                    format="%.2f €"
-                ),
-                "CA Moyen": st.column_config.NumberColumn(
-                    "CA Moyen",
-                    format="%.2f €"
-                ),
-                "Marge Totale": st.column_config.NumberColumn(
-                    "Marge Totale",
-                    format="%.2f €"
-                ),
-                "Marge Moyenne": st.column_config.NumberColumn(
-                    "Marge Moyenne",
-                    format="%.2f €"
-                ),
-                "Taux de Marge": st.column_config.NumberColumn(
-                    "Taux de Marge",
-                    format="%.2f%%"
-                )
-            }
-        )
-
-        # Visualisations
+        # Affichage des graphiques
         col1, col2 = st.columns(2)
         with col1:
-            fig_ca = px.bar(
-                analyses,
-                x=groupby_col,
-                y="CA Total",
-                title=f"CA Total par {analyse_type.split('Par ')[1]}"
-            )
-            st.plotly_chart(fig_ca, use_container_width=True)
-
+            st.plotly_chart(fig1, use_container_width=True)
         with col2:
-            fig_marge = px.bar(
-                analyses,
-                x=groupby_col,
-                y="Taux de Marge",
-                title=f"Taux de Marge par {analyse_type.split('Par ')[1]}"
-            )
-            st.plotly_chart(fig_marge, use_container_width=True)
+            st.plotly_chart(fig2, use_container_width=True)
 
-        # Export des analyses
-        if st.button("💾 Exporter l'analyse détaillée"):
+        # Export des données
+        if st.button("💾 Exporter les données d'analyse"):
             UIManager._download_button(
-                analyses,
-                f"analyse_marges_{analyse_type.lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                "📥 Télécharger l'analyse"
+                data,
+                f"analyse_{chart_type.lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                "📥 Télécharger les données"
             )
 
     @staticmethod
