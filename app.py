@@ -430,121 +430,120 @@ class TariffCalculator:
         )
 
     @staticmethod
-    def display_graphics_tab(commandes_tarifées: pd.DataFrame):
-        st.subheader("📈 Analyses Graphiques")
-        
-        # Sélection du type d'analyse
-        chart_
-        @staticmethod
-    def display_graphics_tab(commandes_tarifées: pd.DataFrame):
-        st.subheader("📈 Analyses Graphiques")
-        
-        # Configuration des analyses
-        col1, col2 = st.columns([2, 1])
+    def display_analysis_tab(commandes_tarifées: pd.DataFrame):
+        """Affiche l'analyse détaillée des marges et des performances financières."""
+        st.subheader("💰 Analyse des Marges et Performances")
+
+        # Calcul des métriques clés
+        total_ca = commandes_tarifées["Tarif Total"].sum()
+        total_marge = commandes_tarifées["Marge"].sum() if "Marge" in commandes_tarifées.columns else 0
+        nombre_commandes = len(commandes_tarifées)
+        marge_moyenne = total_marge / nombre_commandes if nombre_commandes > 0 else 0
+        taux_marge = (total_marge / total_ca * 100) if total_ca > 0 else 0
+
+        # Affichage des métriques principales
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
-            chart_type = st.selectbox(
-                "Type d'analyse",
-                ["Coût par Partenaire", "Coût par Pays", "Coût par Service", "Évolution des Marges"]
+            st.metric(
+                "Chiffre d'Affaires Total",
+                f"{total_ca:,.2f} €"
             )
         with col2:
-            display_mode = st.radio(
-                "Mode d'affichage",
-                ["Barres", "Ligne"],
-                horizontal=True
+            st.metric(
+                "Marge Totale",
+                f"{total_marge:,.2f} €",
+                f"{taux_marge:.1f}%"
+            )
+        with col3:
+            st.metric(
+                "Marge Moyenne/Commande",
+                f"{marge_moyenne:.2f} €"
+            )
+        with col4:
+            st.metric(
+                "Nombre de Commandes",
+                f"{nombre_commandes:,}"
             )
 
-        # Préparation des données selon le type d'analyse
-        if chart_type == "Coût par Partenaire":
-            data = commandes_tarifées.groupby("Nom du partenaire").agg({
-                "Tarif Total": "sum",
-                "Marge": "sum"
-            }).reset_index()
-            fig1 = UIManager.create_plotly_figure(
-                data,
-                "Nom du partenaire",
-                "Tarif Total",
-                "Coût total par Partenaire",
-                display_mode.lower()
-            )
-            fig2 = UIManager.create_plotly_figure(
-                data,
-                "Nom du partenaire",
-                "Marge",
-                "Marge par Partenaire",
-                display_mode.lower()
-            )
-        elif chart_type == "Coût par Pays":
-            data = commandes_tarifées.groupby("Pays destination").agg({
-                "Tarif Total": "sum",
-                "Marge": "sum"
-            }).reset_index()
-            fig1 = UIManager.create_plotly_figure(
-                data,
-                "Pays destination",
-                "Tarif Total",
-                "Coût total par Pays",
-                display_mode.lower()
-            )
-            fig2 = UIManager.create_plotly_figure(
-                data,
-                "Pays destination",
-                "Marge",
-                "Marge par Pays",
-                display_mode.lower()
-            )
-        elif chart_type == "Coût par Service":
-            data = commandes_tarifées.groupby("Service de transport").agg({
-                "Tarif Total": "sum",
-                "Marge": "sum"
-            }).reset_index()
-            fig1 = UIManager.create_plotly_figure(
-                data,
-                "Service de transport",
-                "Tarif Total",
-                "Coût total par Service",
-                display_mode.lower()
-            )
-            fig2 = UIManager.create_plotly_figure(
-                data,
-                "Service de transport",
-                "Marge",
-                "Marge par Service",
-                display_mode.lower()
-            )
-        else:  # Évolution des Marges
-            commandes_tarifées['Date'] = pd.to_datetime('today')  # À remplacer par la vraie colonne de date
-            data = commandes_tarifées.groupby('Date').agg({
-                "Tarif Total": "sum",
-                "Marge": "sum"
-            }).reset_index()
-            fig1 = UIManager.create_plotly_figure(
-                data,
-                "Date",
-                "Tarif Total",
-                "Évolution des coûts",
-                "ligne"
-            )
-            fig2 = UIManager.create_plotly_figure(
-                data,
-                "Date",
-                "Marge",
-                "Évolution des marges",
-                "ligne"
-            )
+        # Analyse détaillée par segment
+        st.subheader("Analyse par Segment")
+        analyse_type = st.selectbox(
+            "Sélectionner le type d'analyse",
+            ["Par Service", "Par Pays", "Par Partenaire"]
+        )
 
-        # Affichage des graphiques
+        if analyse_type == "Par Service":
+            groupby_col = "Service de transport"
+        elif analyse_type == "Par Pays":
+            groupby_col = "Pays destination"
+        else:
+            groupby_col = "Nom du partenaire"
+
+        # Calcul des statistiques par segment
+        analyses = commandes_tarifées.groupby(groupby_col).agg({
+            "Tarif Total": ["sum", "mean", "count"],
+            "Marge": ["sum", "mean"]
+        }).round(2)
+        
+        analyses.columns = ["CA Total", "CA Moyen", "Nb Commandes", "Marge Totale", "Marge Moyenne"]
+        analyses = analyses.reset_index()
+        analyses["Taux de Marge"] = (analyses["Marge Totale"] / analyses["CA Total"] * 100).round(2)
+
+        # Affichage du tableau d'analyse
+        st.dataframe(
+            analyses,
+            use_container_width=True,
+            height=400,
+            column_config={
+                "CA Total": st.column_config.NumberColumn(
+                    "CA Total",
+                    format="%.2f €"
+                ),
+                "CA Moyen": st.column_config.NumberColumn(
+                    "CA Moyen",
+                    format="%.2f €"
+                ),
+                "Marge Totale": st.column_config.NumberColumn(
+                    "Marge Totale",
+                    format="%.2f €"
+                ),
+                "Marge Moyenne": st.column_config.NumberColumn(
+                    "Marge Moyenne",
+                    format="%.2f €"
+                ),
+                "Taux de Marge": st.column_config.NumberColumn(
+                    "Taux de Marge",
+                    format="%.2f%%"
+                )
+            }
+        )
+
+        # Visualisations
         col1, col2 = st.columns(2)
         with col1:
-            st.plotly_chart(fig1, use_container_width=True)
-        with col2:
-            st.plotly_chart(fig2, use_container_width=True)
+            fig_ca = px.bar(
+                analyses,
+                x=groupby_col,
+                y="CA Total",
+                title=f"CA Total par {analyse_type.split('Par ')[1]}"
+            )
+            st.plotly_chart(fig_ca, use_container_width=True)
 
-        # Export des données
-        if st.button("💾 Exporter les données d'analyse"):
+        with col2:
+            fig_marge = px.bar(
+                analyses,
+                x=groupby_col,
+                y="Taux de Marge",
+                title=f"Taux de Marge par {analyse_type.split('Par ')[1]}"
+            )
+            st.plotly_chart(fig_marge, use_container_width=True)
+
+        # Export des analyses
+        if st.button("💾 Exporter l'analyse détaillée"):
             UIManager._download_button(
-                data,
-                f"analyse_{chart_type.lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                "📥 Télécharger les données"
+                analyses,
+                f"analyse_marges_{analyse_type.lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                "📥 Télécharger l'analyse"
             )
 
     @staticmethod
